@@ -1,0 +1,38 @@
+# ── Core ───────────────────────────────────────────────────────────────────
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+pydantic>=2.6.0
+pydantic-settings>=2.2.0
+
+# ── ML / Embeddings ────────────────────────────────────────────────────────
+sentence-transformers>=2.6.0
+faiss-cpu>=1.8.0
+numpy>=1.26.0
+
+# ── NLP ────────────────────────────────────────────────────────────────────
+spacy>=3.7.0
+# After installing: python -m spacy download en_core_web_sm
+#   (or en_core_web_trf for higher accuracy)
+
+# ── Resume Parsing ─────────────────────────────────────────────────────────
+pdfplumber>=0.10.0
+python-docx>=1.1.0
+
+# ── OCR Fallback (optional — only needed for scanned PDFs) ─────────────────
+# pytesseract>=0.3.10
+# pdf2image>=1.17.0
+# Requires Tesseract and Poppler binaries; see README for install instructions
+
+# ── Language Detection ─────────────────────────────────────────────────────
+langdetect>=1.0.9
+
+# ── Caching (optional) ─────────────────────────────────────────────────────
+redis>=5.0.0
+
+# ── Logging ────────────────────────────────────────────────────────────────
+loguru>=0.7.2
+
+# ── Testing ────────────────────────────────────────────────────────────────
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

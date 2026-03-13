@@ -1,0 +1,27 @@
+### Health check
+GET http://127.0.0.1:8000/health
+
+###
+
+### Recommend — raw text
+POST http://127.0.0.1:8000/api/v1/recommend
+Content-Type: application/x-www-form-urlencoded
+
+candidate_name=Rahul Sharma&raw_text=Rahul Sharma. Python developer with 2 years of ML and NLP experience. Skills: Python TensorFlow Scikit-learn NLP SQL Pandas Hugging Face BERT. Education: B.Tech Computer Science NIT Trichy 2024 CGPA 8.6. Experience: Data Science Intern at Flipkart May 2023 Aug 2023. Built recommendation system using collaborative filtering. Certifications: DeepLearning.AI TensorFlow Developer.
+
+###
+
+### Recommend — upload a PDF file (change path to your resume)
+POST http://127.0.0.1:8000/api/v1/recommend
+Content-Type: multipart/form-data; boundary=----Boundary
+
+------Boundary
+Content-Disposition: form-data; name="candidate_name"
+
+Test User
+------Boundary
+Content-Disposition: form-data; name="file"; filename="resume.pdf"
+Content-Type: application/pdf
+
+< C:/path/to/your/resume.pdf
+------Boundary--
