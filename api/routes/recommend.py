@@ -1,14 +1,13 @@
 """
-Recommendation endpoint for the Internship Recommendation Engine API.
+Recommendation and metadata endpoints for the Internship Recommendation Engine.
 
-Exposes a single ``POST /recommend`` route that accepts either a multipart
-file upload (PDF / DOCX / TXT) **or** a JSON body with raw text, then
-executes the full pipeline:
+Exposes:
+- ``POST /recommend`` — resume → ranked internship recommendations
+- ``GET /internships/domains`` — unique domains in the loaded index
+- ``GET /internships/locations`` — unique countries and location types
 
-    parse → preprocess → extract_profile → embed → FAISS search → rank → respond
-
-Structured HTTP errors are returned for invalid input, oversized files,
-empty resumes, and service-unavailability (index not loaded).
+The recommendation pipeline:
+    parse -> preprocess -> extract_profile -> embed -> FAISS search -> rank -> respond
 """
 
 from __future__ import annotations
@@ -31,6 +30,7 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 
 from api.schemas import (
+    CandidateLocationPreference,
     CandidateProfile,
     RecommendationResponse,
     RecommendationResult,
@@ -54,12 +54,6 @@ router = APIRouter(tags=["Recommendations"])
 
 def _get_index(request: Request):
     """Retrieve the InternshipIndex from app state.
-
-    Args:
-        request: The incoming FastAPI request.
-
-    Returns:
-        The loaded :class:`~engine.indexer.InternshipIndex`.
 
     Raises:
         HTTPException: 503 if the index is not loaded.
@@ -86,15 +80,7 @@ def _log_request_background(
     num_results: int,
     latency_ms: float,
 ) -> None:
-    """Background task that logs recommendation request metadata.
-
-    Args:
-        method: HTTP method.
-        path: Request path.
-        candidate_name: Name of the candidate.
-        num_results: Number of results returned.
-        latency_ms: Pipeline latency in milliseconds.
-    """
+    """Background task that logs recommendation request metadata."""
     logger.info(
         "RecommendRequest | {} {} | candidate='{}' | results={} | latency={:.0f}ms",
         method,
@@ -107,12 +93,6 @@ def _log_request_background(
 
 def _validate_extension(filename: str) -> str:
     """Validate and return the lowercase file extension.
-
-    Args:
-        filename: Original filename.
-
-    Returns:
-        Lowercase extension string (e.g. ``'.pdf'``).
 
     Raises:
         HTTPException: 422 if the extension is unsupported.
@@ -132,7 +112,39 @@ def _validate_extension(filename: str) -> str:
     return ext
 
 
-# ── Endpoint: file upload ────────────────────────────────────────────────────
+def _parse_location_preference(
+    preferred_city: str | None,
+    preferred_country: str | None,
+    preferred_location_type: str | None,
+    open_to_remote: bool,
+) -> CandidateLocationPreference | None:
+    """Build a CandidateLocationPreference from form fields.
+
+    Returns None if all preference fields are empty (neutral scoring).
+    """
+    has_any = bool(
+        (preferred_city and preferred_city.strip())
+        or (preferred_country and preferred_country.strip())
+        or (preferred_location_type and preferred_location_type.strip())
+    )
+    if not has_any:
+        return None
+
+    loc_type = None
+    if preferred_location_type and preferred_location_type.strip():
+        val = preferred_location_type.strip()
+        if val in ("Remote", "Hybrid", "On-site"):
+            loc_type = val
+
+    return CandidateLocationPreference(
+        preferred_city=preferred_city.strip() if preferred_city else None,
+        preferred_country=preferred_country.strip() if preferred_country else None,
+        preferred_location_type=loc_type,
+        open_to_remote=open_to_remote,
+    )
+
+
+# ── Endpoint: recommend ──────────────────────────────────────────────────────
 
 
 @router.post(
@@ -141,7 +153,8 @@ def _validate_extension(filename: str) -> str:
     summary="Get internship recommendations from a resume",
     description=(
         "Upload a resume file (PDF, DOCX, or TXT) or send raw text to "
-        "receive ranked internship recommendations."
+        "receive ranked internship recommendations. Optionally provide "
+        "location preferences for location-aware scoring."
     ),
     responses={
         422: {"description": "Invalid input (bad format, too large, empty)"},
@@ -154,25 +167,16 @@ async def recommend(
     file: UploadFile | None = File(default=None, description="Resume file (PDF/DOCX/TXT, max 5 MB)"),
     raw_text: str | None = Form(default=None, description="Raw resume text (alternative to file upload)"),
     candidate_name: str | None = Form(default=None, description="Candidate name (optional)"),
+    preferred_city: str | None = Form(default=None, description="Preferred city (e.g. 'San Francisco, CA')"),
+    preferred_country: str | None = Form(default=None, description="Preferred country (e.g. 'United States')"),
+    preferred_location_type: str | None = Form(default=None, description="Preferred: Remote, Hybrid, or On-site"),
+    open_to_remote: bool = Form(default=True, description="Open to remote opportunities"),
 ) -> RecommendationResponse:
     """Process a resume and return ranked internship recommendations.
 
     Accepts **either** a multipart file upload or raw text via form field.
-    Executes the full pipeline: parse → preprocess → extract → embed →
-    search → rank.
-
-    Args:
-        request: The incoming request (used to access app state).
-        background_tasks: FastAPI background task runner.
-        file: Uploaded resume file (mutually exclusive with ``raw_text``).
-        raw_text: Plain-text resume content.
-        candidate_name: Optional candidate name override.
-
-    Returns:
-        A :class:`~api.schemas.RecommendationResponse` with ranked results.
-
-    Raises:
-        HTTPException: 422 for validation errors, 503 if index unavailable.
+    Executes the full pipeline: parse -> preprocess -> extract -> embed ->
+    search -> rank.
     """
     t0 = time.perf_counter()
 
@@ -185,11 +189,18 @@ async def recommend(
 
         semantic_weight = settings.SEMANTIC_WEIGHT
         keyword_weight = settings.KEYWORD_WEIGHT
+        location_weight = settings.LOCATION_WEIGHT
         top_k = settings.TOP_K_RESULTS
     except Exception:
-        semantic_weight = 0.70
-        keyword_weight = 0.30
+        semantic_weight = 0.60
+        keyword_weight = 0.25
+        location_weight = 0.15
         top_k = 10
+
+    # ── Build location preference ────────────────────────────────────────
+    location_preference = _parse_location_preference(
+        preferred_city, preferred_country, preferred_location_type, open_to_remote,
+    )
 
     # ── Extract raw text from file or form ──────────────────────────────
     parsed_text: str
@@ -229,7 +240,6 @@ async def recommend(
                 },
             )
         finally:
-            # Clean up temp file
             try:
                 os.unlink(tmp_path)
             except OSError:
@@ -272,23 +282,30 @@ async def recommend(
 
     # Override candidate name if provided via form
     resolved_name = candidate_name or "Unknown Candidate"
-    # Try extracting name from profile extractor
-    from engine.extractor import _extract_candidate_name
+    try:
+        from engine.extractor import _extract_candidate_name
+        if resolved_name == "Unknown Candidate":
+            resolved_name = _extract_candidate_name(cleaned)
+    except ImportError:
+        pass
 
-    if resolved_name == "Unknown Candidate":
-        resolved_name = _extract_candidate_name(cleaned)
-
-    # ── Embed → search → rank ────────────────────────────────────────────
+    # ── Embed -> search -> rank ──────────────────────────────────────────
     embedder = get_embedder()
     query_vec = embedder.embed_profile(profile)
 
     faiss_candidates = index.search(query_vec, top_k=20)
 
+    # Get SkillWeighter from index if available
+    skill_weighter = getattr(index, "skill_weighter", None)
+
     results: list[RecommendationResult] = rank_recommendations(
         profile=profile,
         candidates=faiss_candidates,
+        location_preference=location_preference,
+        skill_weighter=skill_weighter,
         semantic_weight=semantic_weight,
         keyword_weight=keyword_weight,
+        location_weight=location_weight,
         top_n=top_k,
     )
 
@@ -297,6 +314,12 @@ async def recommend(
         candidate_name=resolved_name,
         total_results=len(results),
         results=results,
+        location_preference_applied=location_preference is not None,
+        weights_used={
+            "semantic": semantic_weight,
+            "keyword": keyword_weight,
+            "location": location_weight,
+        },
     )
 
     # ── Background logging ───────────────────────────────────────────────
@@ -311,3 +334,44 @@ async def recommend(
     )
 
     return response
+
+
+# ── Metadata endpoints ───────────────────────────────────────────────────────
+
+
+@router.get(
+    "/internships/domains",
+    summary="List unique domains in the index",
+    description="Returns a sorted list of unique internship domains available in the loaded FAISS index.",
+)
+async def list_domains(request: Request) -> dict:
+    """Return unique domains from the loaded index."""
+    index = _get_index(request)
+    domains = sorted({
+        getattr(l, "domain", "") or "Unknown"
+        for l in index.listings
+    })
+    return {"domains": domains, "count": len(domains)}
+
+
+@router.get(
+    "/internships/locations",
+    summary="List unique countries and location types in the index",
+    description="Returns unique countries and location types from the loaded FAISS index.",
+)
+async def list_locations(request: Request) -> dict:
+    """Return unique countries and location types from the loaded index."""
+    index = _get_index(request)
+    countries = sorted({
+        getattr(l, "country", "") or "Unknown"
+        for l in index.listings
+    })
+    location_types = sorted({
+        getattr(l, "location_type", "Remote") or "Remote"
+        for l in index.listings
+    })
+    return {
+        "countries": countries,
+        "country_count": len(countries),
+        "location_types": location_types,
+    }

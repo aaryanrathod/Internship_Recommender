@@ -37,7 +37,7 @@ import os
 import pickle
 import time
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import faiss
 import numpy as np
@@ -59,7 +59,8 @@ def _listing_to_text(listing: InternshipListing) -> str:
     """Concatenate the key fields of an internship listing into a single
     string suitable for embedding.
 
-    Format: ``"<title> <company> <skills> <description>"``
+    Uses all available metadata for richer semantic representation:
+    title, company, domain, required_skills, preferred_skills, description.
 
     Args:
         listing: An :class:`~api.schemas.InternshipListing` instance.
@@ -70,7 +71,9 @@ def _listing_to_text(listing: InternshipListing) -> str:
     parts = [
         listing.title,
         listing.company,
+        getattr(listing, "domain", "") or "",
         " ".join(listing.required_skills),
+        " ".join(getattr(listing, "preferred_skills", []) or []),
         listing.description,
     ]
     return " ".join(p for p in parts if p).strip()
@@ -86,16 +89,23 @@ class InternshipIndex:
     metadata alongside the FAISS index so that search results can be
     mapped back to full listing objects.
 
+    Also persists a :class:`~engine.scorer.SkillWeighter` alongside the
+    index so that TF-IDF skill scoring is available immediately after
+    loading, without needing a second pass over the corpus.
+
     Attributes:
         index: The underlying ``faiss.IndexFlatIP`` (or ``None`` before
             :meth:`build` / :meth:`load`).
         listings: Parallel metadata list aligned with FAISS row IDs.
+        skill_weighter: Optional TF-IDF skill weighter built from the
+            internship corpus.
     """
 
     def __init__(self) -> None:
         """Initialise empty index state."""
         self.index: faiss.IndexFlatIP | None = None
         self.listings: List[InternshipListing] = []
+        self.skill_weighter = None  # populated by build() or load()
         logger.debug("InternshipIndex initialised (empty).")
 
     # ── Build ────────────────────────────────────────────────────────────
@@ -108,7 +118,9 @@ class InternshipIndex:
         """Embed all internship listings and build the FAISS index.
 
         Each listing is converted to text via :func:`_listing_to_text`,
-        batch-embedded, and added to a new ``IndexFlatIP``.
+        batch-embedded, and added to a new ``IndexFlatIP``.  A
+        :class:`~engine.scorer.SkillWeighter` is also built from the
+        corpus for TF-IDF skill scoring.
 
         Args:
             internships: List of validated internship listings.
@@ -122,6 +134,15 @@ class InternshipIndex:
 
         logger.info("Building FAISS index for {} internships …", len(internships))
         t0 = time.perf_counter()
+
+        # ── Build SkillWeighter ───────────────────────────────────────────
+        try:
+            from engine.scorer import SkillWeighter
+            self.skill_weighter = SkillWeighter(internships)
+            logger.debug("SkillWeighter built with {} IDF entries.", len(self.skill_weighter._idf))
+        except ImportError:
+            logger.warning("engine.scorer.SkillWeighter not available — TF-IDF disabled.")
+            self.skill_weighter = None
 
         # ── Prepare texts ────────────────────────────────────────────────
         texts: List[str] = []
@@ -151,12 +172,13 @@ class InternshipIndex:
     # ── Persist / restore ────────────────────────────────────────────────
 
     def save(self, path: str) -> None:
-        """Save the FAISS index and metadata to disk.
+        """Save the FAISS index, metadata, and SkillWeighter to disk.
 
         Two files are written:
             - ``<path>`` — the FAISS binary index
-            - ``<path>.meta.pkl`` — pickled list of
-              :class:`~api.schemas.InternshipListing`
+            - ``<path>.meta.pkl`` — pickled dict containing
+              :class:`~api.schemas.InternshipListing` list and optional
+              :class:`~engine.scorer.SkillWeighter`
 
         Args:
             path: Destination path for the FAISS index file.
@@ -178,7 +200,14 @@ class InternshipIndex:
 
         faiss.write_index(self.index, str(index_path))
         with open(meta_path, "wb") as fh:
-            pickle.dump(self.listings, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(
+                {
+                    "listings": self.listings,
+                    "skill_weighter": self.skill_weighter,
+                },
+                fh,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
 
         idx_size = index_path.stat().st_size
         meta_size = meta_path.stat().st_size
@@ -190,7 +219,7 @@ class InternshipIndex:
         )
 
     def load(self, path: str) -> None:
-        """Load a previously saved FAISS index and metadata from disk.
+        """Load a previously saved FAISS index, metadata, and SkillWeighter.
 
         Args:
             path: Path to the FAISS index file (the metadata pickle is
@@ -217,7 +246,16 @@ class InternshipIndex:
         t0 = time.perf_counter()
         self.index = faiss.read_index(str(index_path))
         with open(meta_path, "rb") as fh:
-            self.listings = pickle.load(fh)
+            payload = pickle.load(fh)
+
+        # Support both old format (bare list) and new format (dict)
+        if isinstance(payload, dict):
+            self.listings = payload.get("listings", [])
+            self.skill_weighter = payload.get("skill_weighter", None)
+        else:
+            # Backwards compatibility: old pickle was just a list
+            self.listings = payload
+            self.skill_weighter = None
 
         elapsed = time.perf_counter() - t0
         logger.info(

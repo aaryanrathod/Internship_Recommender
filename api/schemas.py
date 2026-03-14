@@ -8,8 +8,9 @@ through FAISS retrieval to the final JSON response.
 
 from __future__ import annotations
 
+from typing import Dict, List, Literal, Optional
+
 from pydantic import BaseModel, Field
-from typing import List
 
 
 # ── Candidate Sub-Models ─────────────────────────────────────────────────────
@@ -103,6 +104,29 @@ class CandidateProfile(BaseModel):
     }
 
 
+# ── Location Preference ──────────────────────────────────────────────────────
+
+
+class CandidateLocationPreference(BaseModel):
+    """Location preferences for a candidate, used as a third scoring dimension.
+
+    Attributes:
+        preferred_city: Desired city (e.g. 'San Francisco, CA').
+        preferred_country: Desired country (e.g. 'United States').
+        preferred_location_type: One of Remote / Hybrid / On-site.
+        open_to_remote: Whether the candidate accepts remote roles. Defaults
+            to ``True``, which gives Remote listings a baseline location
+            score even without a city/country match.
+    """
+
+    preferred_city: Optional[str] = Field(default=None, description="Preferred city (e.g. 'San Francisco, CA').")
+    preferred_country: Optional[str] = Field(default=None, description="Preferred country (e.g. 'United States').")
+    preferred_location_type: Optional[Literal["Remote", "Hybrid", "On-site"]] = Field(
+        default=None, description="Preferred working arrangement."
+    )
+    open_to_remote: bool = Field(default=True, description="Accept remote roles regardless of city/country.")
+
+
 # ── Internship Listing ───────────────────────────────────────────────────────
 
 
@@ -113,21 +137,41 @@ class InternshipListing(BaseModel):
         internship_id: Unique identifier for the listing.
         title: Title of the internship position.
         company: Hiring company or organisation.
-        location: Office location or 'Remote'.
+        location: City / region (e.g. 'San Francisco, CA').
+        country: Full country name (e.g. 'United States').
+        location_type: Working arrangement — Remote, Hybrid, or On-site.
         required_skills: Skills explicitly required in the listing.
+        preferred_skills: Nice-to-have skills that are not mandatory.
         description: Full text of the internship description.
-        stipend: Monthly stipend or compensation details, if available.
-        duration: Expected internship duration (e.g. '3 months').
+        domain: Functional domain (e.g. Machine Learning, DevOps).
+        duration_months: Expected internship duration in months.
+        stipend_usd: Monthly stipend in USD (0 = unpaid).
+        experience_level: One of Beginner, Intermediate, or Advanced.
+        stipend: Legacy stipend string (kept for backwards compatibility).
+        duration: Legacy duration string (kept for backwards compatibility).
     """
 
     internship_id: str = Field(description="Unique listing identifier.")
     title: str = Field(description="Internship position title.")
     company: str = Field(description="Hiring company name.")
-    location: str = Field(default="Remote", description="Office location or 'Remote'.")
+    location: str = Field(default="Remote", description="City / region (e.g. 'San Francisco, CA').")
+    country: str = Field(default="", description="Full country name.")
+    location_type: Literal["Remote", "Hybrid", "On-site"] = Field(
+        default="Remote", description="Working arrangement."
+    )
     required_skills: List[str] = Field(default_factory=list, description="Skills required for the role.")
+    preferred_skills: List[str] = Field(default_factory=list, description="Nice-to-have skills.")
     description: str = Field(default="", description="Full internship description text.")
-    stipend: str | None = Field(default=None, description="Stipend or compensation details.")
-    duration: str | None = Field(default=None, description="Expected internship duration.")
+    domain: str = Field(default="", description="Functional domain (e.g. 'Machine Learning').")
+    duration_months: Optional[int] = Field(default=None, description="Duration in months.")
+    stipend_usd: Optional[int] = Field(default=None, description="Monthly stipend in USD (0 = unpaid).")
+    experience_level: Literal["Beginner", "Intermediate", "Advanced"] = Field(
+        default="Beginner", description="Required experience level."
+    )
+
+    # Legacy fields (backwards compatibility with old CSV format)
+    stipend: str | None = Field(default=None, description="Stipend or compensation details (legacy).")
+    duration: str | None = Field(default=None, description="Expected internship duration (legacy).")
 
 
 # ── Recommendation Output ────────────────────────────────────────────────────
@@ -141,22 +185,29 @@ class RecommendationResult(BaseModel):
         title: Title of the recommended internship.
         company: Company offering the internship.
         location: Location of the internship.
+        location_type: Working arrangement (Remote / Hybrid / On-site).
+        location_score: Location match score (0.0 to 1.0).
         required_skills: Skills the listing requires.
         match_score: Hybrid similarity score in the range [0, 1].
-        skill_overlap_pct: Percentage of required skills the candidate
+        skill_overlap_pct: Fraction of required skills the candidate
             possesses, expressed as a float in [0, 1].
-        explanation: Human-readable rationale for why this internship was
-            recommended.
+        explanation: Human-readable rationale for the recommendation.
+        domain: Functional domain of the listing.
+        stipend_usd: Monthly stipend in USD, if available.
     """
 
     internship_id: str = Field(description="Matched internship listing ID.")
     title: str = Field(description="Title of the recommended internship.")
     company: str = Field(description="Company offering the internship.")
     location: str = Field(default="Remote", description="Internship location.")
+    location_type: str = Field(default="Remote", description="Working arrangement.")
+    location_score: float = Field(default=0.0, ge=0.0, le=1.0, description="Location match score (0-1).")
     required_skills: List[str] = Field(default_factory=list, description="Skills required by the listing.")
     match_score: float = Field(ge=0.0, le=1.0, description="Hybrid similarity score (0-1).")
     skill_overlap_pct: float = Field(ge=0.0, le=1.0, description="Fraction of required skills the candidate has.")
     explanation: str = Field(default="", description="Human-readable recommendation rationale.")
+    domain: str = Field(default="", description="Functional domain of the listing.")
+    stipend_usd: Optional[int] = Field(default=None, description="Monthly stipend in USD.")
 
 
 class RecommendationResponse(BaseModel):
@@ -167,6 +218,8 @@ class RecommendationResponse(BaseModel):
         total_results: Number of recommendations returned.
         results: Ordered list of internship recommendations, sorted by
             descending match_score.
+        location_preference_applied: Whether location-based filtering was active.
+        weights_used: Dictionary of scoring weights that were applied.
     """
 
     candidate_name: str = Field(description="Name of the candidate.")
@@ -174,6 +227,13 @@ class RecommendationResponse(BaseModel):
     results: List[RecommendationResult] = Field(
         default_factory=list,
         description="Recommendations sorted by descending match_score.",
+    )
+    location_preference_applied: bool = Field(
+        default=False, description="Whether location preferences were used in scoring."
+    )
+    weights_used: Dict[str, float] = Field(
+        default_factory=lambda: {"semantic": 0.60, "keyword": 0.25, "location": 0.15},
+        description="Scoring weights applied for this response.",
     )
 
 

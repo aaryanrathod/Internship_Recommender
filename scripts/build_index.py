@@ -8,7 +8,7 @@ to disk.
 
 Usage::
 
-    python scripts/build_index.py --input data/internships.csv
+    python scripts/build_index.py --input data/internships_batch1.csv
     python scripts/build_index.py --input data/internships.json --output data/faiss.index
 """
 
@@ -19,6 +19,7 @@ import csv
 import json
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 from loguru import logger
@@ -35,6 +36,27 @@ from engine.embedder import get_embedder
 from engine.indexer import InternshipIndex
 
 
+# ── Required CSV columns ─────────────────────────────────────────────────────
+
+_REQUIRED_COLUMNS = {"internship_id", "title", "company"}
+
+_EXPECTED_COLUMNS = (
+    _REQUIRED_COLUMNS
+    | {
+        "location",
+        "country",
+        "location_type",
+        "description",
+        "required_skills",
+        "preferred_skills",
+        "domain",
+        "duration_months",
+        "stipend_usd",
+        "experience_level",
+    }
+)
+
+
 # ── Data loaders ─────────────────────────────────────────────────────────────
 
 
@@ -49,6 +71,29 @@ def _load_csv(path: Path) -> list[dict]:
     """
     with open(path, newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
+
+        # ── Column validation ────────────────────────────────────────────
+        if reader.fieldnames is None:
+            logger.error("CSV file has no header row.")
+            sys.exit(1)
+
+        actual = set(reader.fieldnames)
+        missing = _REQUIRED_COLUMNS - actual
+        if missing:
+            logger.error(
+                "CSV is missing REQUIRED columns: {}. Found columns: {}",
+                sorted(missing),
+                sorted(actual),
+            )
+            sys.exit(1)
+
+        extra_expected = _EXPECTED_COLUMNS - actual
+        if extra_expected:
+            logger.info(
+                "CSV does not contain optional columns (will use defaults): {}",
+                sorted(extra_expected),
+            )
+
         return list(reader)
 
 
@@ -93,10 +138,11 @@ def _load_data(path: Path) -> list[dict]:
 
 
 def _parse_skills_field(raw: str | list) -> list[str]:
-    """Normalise the required_skills field from raw input.
+    """Normalise a skills field from raw input.
 
-    Handles both a Python list (from JSON) and a comma-separated string
-    (from CSV).
+    Handles a Python list (from JSON), pipe-separated strings (new CSV
+    format, e.g. ``"Python|SQL|TensorFlow"``), and comma-separated strings
+    (legacy CSV format).
 
     Args:
         raw: The raw skills value.
@@ -107,7 +153,9 @@ def _parse_skills_field(raw: str | list) -> list[str]:
     if isinstance(raw, list):
         return [s.strip() for s in raw if s and str(s).strip()]
     if isinstance(raw, str) and raw.strip():
-        return [s.strip() for s in raw.split(",") if s.strip()]
+        # Pipe-separated takes precedence (new format)
+        sep = "|" if "|" in raw else ","
+        return [s.strip() for s in raw.split(sep) if s.strip()]
     return []
 
 
@@ -127,13 +175,21 @@ def _validate_rows(rows: list[dict]) -> list[InternshipListing]:
 
     for i, row in enumerate(rows, start=1):
         try:
-            # Normalise skills if present
+            # Normalise skills fields if present
             if "required_skills" in row:
                 row["required_skills"] = _parse_skills_field(row["required_skills"])
+            if "preferred_skills" in row:
+                row["preferred_skills"] = _parse_skills_field(row["preferred_skills"])
+
+            # Convert numeric fields from CSV strings
+            if "duration_months" in row and isinstance(row["duration_months"], str):
+                row["duration_months"] = int(row["duration_months"]) if row["duration_months"].strip() else None
+            if "stipend_usd" in row and isinstance(row["stipend_usd"], str):
+                row["stipend_usd"] = int(row["stipend_usd"]) if row["stipend_usd"].strip() else None
 
             listing = InternshipListing(**row)
             valid.append(listing)
-        except (ValidationError, TypeError) as exc:
+        except (ValidationError, TypeError, ValueError) as exc:
             logger.warning("Row {}: skipped — {}", i, exc)
             skipped += 1
 
@@ -144,6 +200,41 @@ def _validate_rows(rows: list[dict]) -> list[InternshipListing]:
         len(rows),
     )
     return valid
+
+
+# ── Summary helpers ──────────────────────────────────────────────────────────
+
+
+def _print_breakdown(listings: list[InternshipListing]) -> None:
+    """Print dataset breakdowns by domain and location_type."""
+    # Domain breakdown
+    domain_counts = Counter(
+        getattr(l, "domain", "Unknown") or "Unknown" for l in listings
+    )
+    loc_type_counts = Counter(
+        getattr(l, "location_type", "Unknown") or "Unknown" for l in listings
+    )
+    exp_counts = Counter(
+        getattr(l, "experience_level", "Unknown") or "Unknown" for l in listings
+    )
+
+    print()
+    print("  Domain breakdown:")
+    for domain, count in sorted(domain_counts.items(), key=lambda x: -x[1]):
+        bar = "#" * count
+        print(f"    {domain:<25s} {count:>3d}  {bar}")
+
+    print()
+    print("  Location type breakdown:")
+    for lt, count in sorted(loc_type_counts.items(), key=lambda x: -x[1]):
+        pct = count / len(listings) * 100
+        print(f"    {lt:<12s} {count:>3d}  ({pct:.0f}%)")
+
+    print()
+    print("  Experience level breakdown:")
+    for el, count in sorted(exp_counts.items(), key=lambda x: -x[1]):
+        pct = count / len(listings) * 100
+        print(f"    {el:<15s} {count:>3d}  ({pct:.0f}%)")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -172,12 +263,16 @@ def main(input_path: str, output_path: str | None = None) -> None:
                 output_path,
             )
 
-    # ── Load data ────────────────────────────────────────────────────────
+    # ── Validate input path ──────────────────────────────────────────────
     src = Path(input_path).resolve()
     if not src.exists():
         logger.error("Input file not found: {}", src)
         sys.exit(1)
+    if not src.is_file():
+        logger.error("Input path is not a file: {}", src)
+        sys.exit(1)
 
+    # ── Load data ────────────────────────────────────────────────────────
     logger.info("Loading data from '{}' …", src)
     rows = _load_data(src)
     logger.info("Read {} raw rows.", len(rows))
@@ -212,7 +307,13 @@ def main(input_path: str, output_path: str | None = None) -> None:
     print(f"  Index file       : {output_path}")
     print(f"  Index size       : {idx_size_kb:.1f} KB")
     print(f"  Total time       : {elapsed:.2f}s")
+    sw_status = "YES (built & saved)" if index.skill_weighter else "NO (not available)"
+    print(f"  SkillWeighter    : {sw_status}")
     print("=" * 60)
+
+    _print_breakdown(listings)
+
+    print()
 
 
 # ── CLI entry point ──────────────────────────────────────────────────────────

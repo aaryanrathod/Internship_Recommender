@@ -6,15 +6,15 @@ and a .env file, providing type-safe access to all engine parameters.
 """
 
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, model_validator
 
 
 class Settings(BaseSettings):
     """Central configuration for the Internship Recommendation Engine.
 
-    All fields can be overridden via environment variables or a `.env` file
+    All fields can be overridden via environment variables or a ``.env`` file
     located in the project root. Environment variables take precedence over
-    values defined in the `.env` file.
+    values defined in the ``.env`` file.
 
     Attributes:
         EMBEDDING_MODEL: Name of the SentenceTransformer model used to generate
@@ -26,16 +26,21 @@ class Settings(BaseSettings):
         TOP_K_RESULTS: Maximum number of recommendation results to return
             per query.
         SEMANTIC_WEIGHT: Weight assigned to semantic (embedding-based)
-            similarity in the hybrid scoring formula. Must sum to 1.0 with
-            KEYWORD_WEIGHT.
-        KEYWORD_WEIGHT: Weight assigned to keyword (TF-IDF / BM25) similarity
-            in the hybrid scoring formula. Must sum to 1.0 with
-            SEMANTIC_WEIGHT.
+            similarity in the hybrid scoring formula.
+        KEYWORD_WEIGHT: Weight assigned to keyword (skill overlap) similarity
+            in the hybrid scoring formula.
+        LOCATION_WEIGHT: Weight assigned to location-based matching in the
+            hybrid scoring formula.
+        CANDIDATE_LOCATION: Default candidate location preference string.
+            Empty string means no location preference applied.
         REDIS_URL: Connection URL for the Redis instance used for caching
             embeddings and intermediate results.
         LOG_LEVEL: Python logging level for the application logger.
         MAX_TEXT_LENGTH: Maximum character length for raw text inputs
             (resumes, descriptions) before truncation.
+
+    Note:
+        ``SEMANTIC_WEIGHT + KEYWORD_WEIGHT + LOCATION_WEIGHT`` must equal 1.0.
     """
 
     EMBEDDING_MODEL: str = Field(
@@ -53,12 +58,20 @@ class Settings(BaseSettings):
         description="Number of top recommendations to return.",
     )
     SEMANTIC_WEIGHT: float = Field(
-        default=0.70,
+        default=0.60,
         description="Weight for semantic similarity in hybrid scoring (0-1).",
     )
     KEYWORD_WEIGHT: float = Field(
-        default=0.30,
+        default=0.25,
         description="Weight for keyword similarity in hybrid scoring (0-1).",
+    )
+    LOCATION_WEIGHT: float = Field(
+        default=0.15,
+        description="Weight for location-based matching in hybrid scoring (0-1).",
+    )
+    CANDIDATE_LOCATION: str = Field(
+        default="",
+        description="Default candidate location preference (empty = no preference).",
     )
     REDIS_URL: str = Field(
         description="Redis connection URL (e.g. redis://localhost:6379/0).",
@@ -71,6 +84,19 @@ class Settings(BaseSettings):
         default=10000,
         description="Maximum character length for input text fields.",
     )
+
+    @model_validator(mode="after")
+    def _check_weights_sum_to_one(self) -> "Settings":
+        """Validate that the three scoring weights sum to 1.0 (± tolerance)."""
+        total = self.SEMANTIC_WEIGHT + self.KEYWORD_WEIGHT + self.LOCATION_WEIGHT
+        if not (0.99 <= total <= 1.01):
+            raise ValueError(
+                f"SEMANTIC_WEIGHT ({self.SEMANTIC_WEIGHT}) + "
+                f"KEYWORD_WEIGHT ({self.KEYWORD_WEIGHT}) + "
+                f"LOCATION_WEIGHT ({self.LOCATION_WEIGHT}) = {total:.4f}, "
+                f"but must sum to 1.0."
+            )
+        return self
 
     model_config = {
         "env_file": ".env",
