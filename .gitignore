@@ -32,3 +32,6 @@ tmp/
 # OS
 .DS_Store
 Thumbs.db
+
+data/faiss.index
+data/faiss.index.meta.pkl
