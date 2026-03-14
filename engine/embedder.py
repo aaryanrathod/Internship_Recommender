@@ -117,6 +117,10 @@ class Embedder:
         """
         try:
             from config import settings
+            if not settings.REDIS_URL:
+                logger.debug("REDIS_URL is empty — caching disabled.")
+                return None
+
             import redis
 
             client = redis.Redis.from_url(

@@ -17,10 +17,6 @@ build/
 venv/
 env/
 
-# FAISS index (generated — rebuild with build_index.py)
-data/faiss.index
-data/faiss.index.meta.pkl
-
 # Pytest cache
 .pytest_cache/
 .cache/
@@ -28,9 +24,6 @@ data/faiss.index.meta.pkl
 # IDE
 .vscode/
 .idea/
-
-# Streamlit
-.streamlit/
 
 # Temp files
 tmp/

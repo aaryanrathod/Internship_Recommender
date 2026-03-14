@@ -3,6 +3,9 @@ Application configuration module for the Internship Recommendation Engine.
 
 Uses Pydantic BaseSettings to load configuration from environment variables
 and a .env file, providing type-safe access to all engine parameters.
+
+All fields have sensible defaults so the app works without a .env file
+(e.g. on Streamlit Cloud where .env is not committed).
 """
 
 from pydantic_settings import BaseSettings
@@ -16,29 +19,6 @@ class Settings(BaseSettings):
     located in the project root. Environment variables take precedence over
     values defined in the ``.env`` file.
 
-    Attributes:
-        EMBEDDING_MODEL: Name of the SentenceTransformer model used to generate
-            dense vector embeddings for semantic similarity.
-        FAISS_INDEX_PATH: Filesystem path where the FAISS vector index is
-            persisted and loaded from.
-        INTERNSHIP_DATA_PATH: Filesystem path to the CSV/JSON file containing
-            internship listing data.
-        TOP_K_RESULTS: Maximum number of recommendation results to return
-            per query.
-        SEMANTIC_WEIGHT: Weight assigned to semantic (embedding-based)
-            similarity in the hybrid scoring formula.
-        KEYWORD_WEIGHT: Weight assigned to keyword (skill overlap) similarity
-            in the hybrid scoring formula.
-        LOCATION_WEIGHT: Weight assigned to location-based matching in the
-            hybrid scoring formula.
-        CANDIDATE_LOCATION: Default candidate location preference string.
-            Empty string means no location preference applied.
-        REDIS_URL: Connection URL for the Redis instance used for caching
-            embeddings and intermediate results.
-        LOG_LEVEL: Python logging level for the application logger.
-        MAX_TEXT_LENGTH: Maximum character length for raw text inputs
-            (resumes, descriptions) before truncation.
-
     Note:
         ``SEMANTIC_WEIGHT + KEYWORD_WEIGHT + LOCATION_WEIGHT`` must equal 1.0.
     """
@@ -48,9 +28,11 @@ class Settings(BaseSettings):
         description="SentenceTransformer model identifier for embedding generation.",
     )
     FAISS_INDEX_PATH: str = Field(
+        default="data/faiss.index",
         description="Path to the serialized FAISS index file.",
     )
     INTERNSHIP_DATA_PATH: str = Field(
+        default="data/internships_batch1.csv",
         description="Path to the internship listings dataset.",
     )
     TOP_K_RESULTS: int = Field(
@@ -74,7 +56,8 @@ class Settings(BaseSettings):
         description="Default candidate location preference (empty = no preference).",
     )
     REDIS_URL: str = Field(
-        description="Redis connection URL (e.g. redis://localhost:6379/0).",
+        default="",
+        description="Redis connection URL. Leave empty to disable caching.",
     )
     LOG_LEVEL: str = Field(
         default="INFO",
@@ -87,7 +70,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _check_weights_sum_to_one(self) -> "Settings":
-        """Validate that the three scoring weights sum to 1.0 (± tolerance)."""
+        """Validate that the three scoring weights sum to 1.0 (+-tolerance)."""
         total = self.SEMANTIC_WEIGHT + self.KEYWORD_WEIGHT + self.LOCATION_WEIGHT
         if not (0.99 <= total <= 1.01):
             raise ValueError(
