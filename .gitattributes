@@ -1,0 +1,2 @@
+data/faiss.index filter=lfs diff=lfs merge=lfs -text
+data/faiss.index.meta.pkl filter=lfs diff=lfs merge=lfs -text
