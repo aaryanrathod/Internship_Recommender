@@ -24,24 +24,6 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-
-# ---------------------------------------------------------------------------
-# Auto-download spaCy model if missing (needed on Streamlit Cloud)
-# ---------------------------------------------------------------------------
-@st.cache_resource(show_spinner="Downloading language model ...")
-def _ensure_spacy_model():
-    """Download en_core_web_sm if it's not already installed."""
-    import spacy
-    try:
-        spacy.load("en_core_web_sm")
-    except OSError:
-        from spacy.cli import download
-        download("en_core_web_sm")
-        spacy.load("en_core_web_sm")
-
-_ensure_spacy_model()
-
-
 # ---------------------------------------------------------------------------
 # Guarded engine imports
 # ---------------------------------------------------------------------------
